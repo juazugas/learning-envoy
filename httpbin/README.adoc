@@ -1,0 +1,231 @@
+= Envoy & httpbin sample
+jzuriaga
+v1.0, 2022-12-26
+
+
+== Introduction
+
+Example extracted from the book _Istion in Action_, chapter _3. Istio's data plane. The envoy proxy_
+
+_3.3 Envoy in Action_
+
+
+== Getting containers
+
+[source]
+podman pull envoyproxy/envoy-dev
+
+More information at : https://www.envoyproxy.io/docs/envoy/latest/start/docker
+
+[source]
+podman pull kennethreitz/httpbin
+
+More information at :  http://httpbin.org/
+
+== Running the servers
+
+[source,bash]
+----
+podman run  --rm -d --name httpbin -p 8000:80 kennethreitz/httpbin
+podman run --net host --rm -it --name envoy-external -p 15001:15001 \
+        -v ./envoy-external.yaml:/etc/envoy/envoy.yaml:Z \
+        envoyproxy/envoy-dev
+----
+
+Requesting the servers
+
+[source]
+----
+$ http :8000/headers
+HTTP/1.1 200 OK
+Access-Control-Allow-Credentials: true
+Access-Control-Allow-Origin: *
+Connection: keep-alive
+Content-Length: 183
+Content-Type: application/json
+Date: Mon, 26 Dec 2022 11:21:38 GMT
+Server: gunicorn/19.9.0
+
+{
+    "headers": {
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Host": "localhost:8000",
+        "User-Agent": "HTTPie/3.2.1"
+    }
+}
+
+$ http :15001/headers
+HTTP/1.1 200 OK
+access-control-allow-credentials: true
+access-control-allow-origin: *
+content-length: 193
+content-type: application/json
+date: Mon, 26 Dec 2022 11:20:13 GMT
+server: envoy
+x-envoy-upstream-service-time: 1
+
+{
+    "headers": {
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate",
+        "Host": "localhost",
+        "User-Agent": "HTTPie/3.2.1",
+        "X-Envoy-Expected-Rq-Timeout-Ms": "15000"
+    }
+}
+----
+
+- Runnig multicontainer in a pod
+
+[source]
+----
+podman pod create --label topic=envoy -p 8000:80 -p 15001:15001 httpbin-sample
+podman run -d --name httpbin --pod httpbin-sample kennethreitz/httpbin
+podman run -it --name envoy --pod httpbin-sample -v ./envoy-pod.yaml:/etc/envoy/envoy.yaml:Z envoyproxy/envoy-dev
+----
+
+Checking the containers
+
+[source]
+----
+$ podman pod inspect httpbin-sample | jq .Containers
+[
+  {
+    "Id": "0c4949eca7d2bd6447805aebf93305f84db1498a6dc2ca4e68fda380883866fa",
+    "Name": "f7b183b1fb65-infra",
+    "State": "running"
+  },
+  {
+    "Id": "a95a3278eabb45bf75ba331c92a58e4ac217728e5f5a3189c97421170c09bf24",
+    "Name": "httpbin",
+    "State": "running"
+  },
+  {
+    "Id": "da630e3b0760895587e95772160048981f36ba8f4f412c204f324d44d65a9b10",
+    "Name": "envoy",
+    "State": "runnning"
+  }
+]
+----
+
+== Enable debug
+
+- Specify filter log
+
+[source,yaml,linenums]
+.envoy-pod.yaml
+...
+include::envoy-pod.yaml[lines=10..12;14..17,opts=linenums]
+
+
+- Enable log level to the envoy process
+
+[source,bash]
+pomdan run ... envoyproxy/envoy-dev -c /etc/envoy/envoy.yaml --log-level [off|info|debug|trace]
+
+- Enable logging per component
+
+[source,bash]
+pomdan run ... envoyproxy/envoy-dev -c /etc/envoy/envoy.yaml --log-level off --component-log-level connection:debug,router:debug
+
+== Validate configuration
+
+https://www.envoyproxy.io/docs/envoy/latest/start/quick-start/run-envoy.html?highlight=debug#validating-your-envoy-configuration
+
+--mode validate
+
+[source,bash]
+----
+$ podman run --rm -it --name envoy --pod httpbin-sample -v ./envoy-pod-chg-timeout.yaml:/etc/envoy/envoy.yaml:Z envoyproxy/envoy-dev -c /etc/envoy/envoy.yaml --mode validate
+[2022-12-26 12:46:13.344][1][info][main] [source/server/server.cc:807] runtime: {}
+[2022-12-26 12:46:13.344][1][info][config] [source/server/configuration_impl.cc:131] loading tracing configuration
+[2022-12-26 12:46:13.344][1][info][config] [source/server/configuration_impl.cc:91] loading 0 static secret(s)
+[2022-12-26 12:46:13.344][1][info][config] [source/server/configuration_impl.cc:97] loading 1 cluster(s)
+[2022-12-26 12:46:13.345][1][info][config] [source/server/configuration_impl.cc:101] loading 1 listener(s)
+[2022-12-26 12:46:13.348][1][info][config] [source/server/configuration_impl.cc:113] loading stats configuration
+configuration '/etc/envoy/envoy.yaml' OK
+----
+
+== Envoy Admin API
+
+Expose the envoy's admin API server
+
+[source,bash]
+podman run --rm -it --name envoy --pod httpbin-sample -v ./envoy-pod-admin.yaml:/etc/envoy/envoy.yaml:Z envoyproxy/envoy-dev -c /etc/envoy/envoy.yaml
+
+Request the stats from the Admin endpoint
+
+[source,bash]
+podman run --rm -it --name curl --pod httpbin-sample curlimages/curl \
+        curl -X GET http://localhost:15000/stats
+
+
+Admin endpoints :
+
+- /certs — Certificates on the machine
+- /clusters — Clusters Envoy is configured with
+- /config_dump — A dump of the Envoy configuration
+- /listeners — Listeners Envoy is configured with
+- /logging — Lets you view and change logging settings
+- /stats — Envoy statistics
+- /stats/prometheus — Envoy statistics formatted as Prometheus records
+
+== Envoy configurations
+
+=== Envoy Retry policies
+
+[source,bash]
+podman run --rm -it --name envoy --pod httpbin-sample -v ./envoy-pod-retry.yaml:/etc/envoy/envoy.yaml:Z envoyproxy/envoy-dev -c /etc/envoy/envoy.yaml
+
+[source,yaml,linenums]
+.envoy-admin.yaml
+...
+include::envoy-pod-retry.yaml[lines=33..34;37..39]
+
+Emulate a response 500 status
+
+[source,bash]
+$ http :15001/status/500
+HTTP/1.1 500 Internal Server Error
+access-control-allow-credentials: true
+access-control-allow-origin: *
+content-length: 0
+content-type: text/html; charset=utf-8
+date: Mon, 26 Dec 2022 13:00:26 GMT
+server: envoy
+x-envoy-upstream-service-time: 147
+
+Retrieve the envoy stats
+
+[source,bash]
+$ podman run --rm -it --name curl --pod httpbin-sample curlimages/curl curl -X GET http://localhost:15000/stats |grep retry
+cluster.httpbin_service.circuit_breakers.default.rq_retry_open: 0
+cluster.httpbin_service.circuit_breakers.high.rq_retry_open: 0
+cluster.httpbin_service.retry.upstream_rq_500: 3
+cluster.httpbin_service.retry.upstream_rq_5xx: 3
+cluster.httpbin_service.retry.upstream_rq_completed: 3
+cluster.httpbin_service.retry_or_shadow_abandoned: 0
+cluster.httpbin_service.upstream_rq_retry: 3
+cluster.httpbin_service.upstream_rq_retry_backoff_exponential: 3
+cluster.httpbin_service.upstream_rq_retry_backoff_ratelimited: 0
+cluster.httpbin_service.upstream_rq_retry_limit_exceeded: 1
+cluster.httpbin_service.upstream_rq_retry_overflow: 0
+cluster.httpbin_service.upstream_rq_retry_success: 0
+
+== Clear running servers
+
+[source,bash]
+podman pod stop httpbin-sample
+podman pod rm httpbin-sample
+
+== Extras
+
+Running envoy in daemon mode
+
+Please read for more information ...
+
+- https://fedoramagazine.org/use-udica-to-build-selinux-policy-for-containers/
+- https://lists.podman.io/archives/list/podman@lists.podman.io/thread/EOYOR2H6EEOLBFZNSTMAXNTRDSV3OSJR/
+- https://www.envoyproxy.io/docs/envoy/latest/start/docker#permissions-for-running-docker-envoy-containers-as-a-non-root-user
